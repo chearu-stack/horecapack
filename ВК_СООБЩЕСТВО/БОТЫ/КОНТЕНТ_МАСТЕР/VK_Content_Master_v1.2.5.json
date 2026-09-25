@@ -1,0 +1,309 @@
+{
+  "meta": {
+    "name": "VK_Content_Master_v1.2.5",
+    "version": "1.2.5",
+    "description": "План Б: расширение данных без изменения FSM. 12 pain points на категорию, пул глаголов, 3 шаблона открытия, 3 формата цены, 3 стратегии expand_text, контрастные связки. FSM не изменён.",
+    "author": "Архитектор",
+    "date": "2026-04-05"
+  },
+
+  "immutable_context": {
+    "categories": ["посуда", "бытовая химия", "сопутствующие товары"],
+    "modes": ["post", "card"],
+    "current_template_version": "v1.2.5",
+    "brand_voice": {
+      "tone": "коротко, сухо, продающе",
+      "must_have": ["цифры", "цена", "призыв"],
+      "forbidden": ["успейте", "суперскидка", "друзья", "возможно", "наверное", "примерно", "около", "где-то"]
+    },
+    "card_rules": {
+      "max_lines": 5,
+      "advantage_max_chars": 60,
+      "trim_mode": "word_safe"
+    },
+    "cta_keywords": {
+      "посуда": "Посуда",
+      "бытовая химия": "Химия",
+      "сопутствующие товары": "Комплект"
+    }
+  },
+
+  "fsm": {
+    "initial_state": "AWAITING_REQUEST",
+    "states": {
+      "AWAITING_REQUEST": { "action": "parse_intent", "next_state": "CHECK_INPUT" },
+      "CHECK_INPUT": {
+        "checks": ["product != null", "product.length >= 2", "category in categories"],
+        "on_success": "SET_EXCEPTION_FLAG",
+        "on_failure": "ERROR"
+      },
+      "SET_EXCEPTION_FLAG": {
+        "action": "roll_probability",
+        "probability": 0.2,
+        "set_flag": "exception_flag",
+        "next_state": "GENERATE_BASE"
+      },
+      "GENERATE_BASE": { "action": "generate_fast", "next_state": "VALIDATE" },
+      "VALIDATE": { "action": "run_validators", "on_success": "OUTPUT", "on_failure": "CLASSIFY_ERRORS" },
+      "CLASSIFY_ERRORS": {
+        "action": "classify_by_rules",
+        "rules": {
+          "format": ["price_regex_fail", "no_digits", "wrong_currency_symbol"],
+          "structure": ["missing_cta", "category_mismatch", "missing_required_field"],
+          "semantic": ["too_long", "too_short", "duplicate", "no_pain_point"]
+        },
+        "next_state": "FIX"
+      },
+      "FIX": {
+        "strategy": "apply_targeted_fixes",
+        "execution_mode": "sequential_with_lock",
+        "lock_rules": ["price"],
+        "contextual_priority": {
+          "post": ["price", "cta", "structure", "length", "deduplication"],
+          "card": ["price", "structure", "length", "cta", "deduplication"]
+        },
+        "fix_map": {
+          "missing_price": "insert_price",
+          "bad_price_format": "normalize_price",
+          "missing_cta": "append_cta",
+          "long_advantage": "trim_advantage",
+          "too_long_text": "shorten_text",
+          "too_short_text": "expand_text",
+          "duplicate": "replace_pain_point",
+          "category_conflict": "remove_extra_products"
+        },
+        "score_improvement_map": {
+          "low_digit_score": "add_numeric_argument",
+          "low_pain_point": "replace_pain_point",
+          "low_keyword": "inject_category_keyword",
+          "low_price_score": "reinforce_price_mention"
+        },
+        "post_fix_validation_scope": "affected_rules + dependent_rules",
+        "next_state": "REVALIDATE"
+      },
+      "REVALIDATE": {
+        "action": "run_validators",
+        "on_success": "CHECK_SEMANTIC_SCORE",
+        "on_failure": "PARTIAL_REGENERATE"
+      },
+      "CHECK_SEMANTIC_SCORE": {
+        "action": "compute_semantic_score",
+        "if_score_below_target": "IMPROVE_SEMANTICS",
+        "if_score_above_target": "OUTPUT"
+      },
+      "IMPROVE_SEMANTICS": {
+        "description": "Повышение семантического качества до target 0.8",
+        "max_attempts": 2,
+        "action": "apply_score_improvements",
+        "on_max_attempts": "FULL_REGENERATE",
+        "next_state": "REVALIDATE"
+      },
+      "PARTIAL_REGENERATE": {
+        "regenerate_map": {
+          "duplicate": ["pain_point"],
+          "missing_cta": ["cta"],
+          "price_error": ["numbers"],
+          "too_long": ["text"],
+          "too_short": ["text"]
+        },
+        "strategies": {
+          "pain_point": { "method": "select_random_from_pool", "preserve_surrounding": true },
+          "cta": { "method": "inject_keyword", "position": "append" },
+          "numbers": { "method": "replace_with_default", "default_volume": 50 },
+          "text": { "method": "adjust_length", "target_bounds": [400, 900] }
+        },
+        "next_state": "REVALIDATE"
+      },
+      "FULL_REGENERATE": {
+        "max_attempts": 1,
+        "change_template": true,
+        "force_new_pain_point": true,
+        "next_state": "GENERATE_BASE"
+      },
+      "OUTPUT": { "action": "display_result", "is_terminal": true },
+      "ERROR": { "action": "notify_admin", "message": "Ошибка входных данных", "is_terminal": true }
+    },
+    "budgets": {
+      "fix_cycle_max_attempts": 3,
+      "semantic_improve_max_attempts": 2,
+      "after_max": "FULL_REGENERATE"
+    }
+  },
+
+  "validators": {
+    "reading_time": { "words_min": 60, "words_max": 120, "chars_min": 400, "chars_max": 900 },
+    "price": { "regex": "\\d+\\s*(руб|₽)(\\s*/\\s*шт)?", "no_letters_inside_number": true, "must_be_positive": true },
+    "cta": { "required_if": "mode=post AND exception_flag=false" },
+    "card_lines": { "max": 5 },
+    "deduplication": { "last_n": 5, "threshold": 0.8 },
+    "semantic_quality": {
+      "scoring_enabled": true,
+      "min_score": 0.6,
+      "target_score": 0.8,
+      "scoring_rules": [
+        { "condition": "contains_digit", "points": 0.2 },
+        { "condition": "contains_category_keyword", "points": 0.2 },
+        { "condition": "contains_pain_point", "points": 0.2 },
+        { "condition": "contains_price", "points": 0.2 },
+        { "condition": "length_between_60_and_120_words", "points": 0.2 }
+      ],
+      "action_if_below_min": "FULL_REGENERATE",
+      "action_if_below_target": "IMPROVE_SEMANTICS"
+    }
+  },
+
+  "variability_config": {
+    "pain_points": {
+      "посуда": [
+        "дешёвые трескаются от кипятка",
+        "крышки не закрываются плотно",
+        "в микроволновке плавятся",
+        "занимают полшкафа, а толку ноль",
+        "при падении разлетаются на осколки",
+        "от жира не отмываются даже с содой",
+        "в морозилке становятся хрупкими как стекло",
+        "запах борща въедается навсегда",
+        "крышки теряются, а новые не купить",
+        "при перевозке текут в сумке",
+        "на сковородку не поставишь — плавится",
+        "дети роняют — покупай каждый месяц"
+      ],
+      "бытовая химия": [
+        "после уборки пахнет уксусом, а не чистотой",
+        "перчатки рвутся через 5 минут",
+        "губка воняет через 2 дня",
+        "от пятен не спасает даже трение",
+        "на кухне жирный налёт остаётся",
+        "плиту отмываю полчаса",
+        "дорогие средства работают как вода",
+        "дешёвый порошок не выполаскивается",
+        "пятна от кофе навсегда",
+        "натираю до блеска — разводы всё равно есть",
+        "плесень в ванной не берёт даже хлорка",
+        "пол после мытья липкий"
+      ],
+      "сопутствующие товары": [
+        "мешки для мусора рвутся по дороге к баку",
+        "перчатки лопаются на пальцах",
+        "губки царапают сковородки",
+        "бумажные полотенца рвутся мокрыми",
+        "салфетки оставляют ворс на стёклах",
+        "пакеты для заморозки пропускают воздух",
+        "контейнеры без крышек — бесполезны",
+        "фольга тонкая — рвётся при нарезке",
+        "пищевая плёнка не липнет",
+        "формы для выпечки размокают от теста",
+        "трубочки для коктейлей размокают",
+        "зубочистки ломаются"
+      ]
+    },
+
+    "verb_pool": {
+      "pain_verbs": [
+        "трескается", "ломается", "течёт", "плавится", 
+        "рвётся", "воняет", "царапает", "липнет", 
+        "не отмывается", "выцветает", "деформируется", "расслаивается"
+      ],
+      "contrast_connectors": [
+        "дешёвые — {pain}. Эти — нет.",
+        "обычные {pain}. А эти {antipain}.",
+        "забудьте про {pain}. Здесь {solution}.",
+        "хватит покупать {problem}. Возьмите {product}.",
+        "в отличие от {competitor}, эти {feature}."
+      ]
+    },
+
+    "sentence_templates": {
+      "openings": [
+        "{product}, {volume_or_feature}.",
+        "{product} для {task}.",
+        "Не {problem}, а {solution}."
+      ],
+      "characteristics": [
+        "{temp_range}. {material}.",
+        "Объём: {values}. {feature}.",
+        "{prop1}. {prop2}. {prop3}."
+      ],
+      "pain_to_solution": [
+        "{pain_point}. {product} — нет.",
+        "Забудьте про {pain_point}. {feature}.",
+        "{competitor} {pain_point}. А этот — {antipain}."
+      ],
+      "price_and_cta": [
+        "{price}. {category}. {cta}.",
+        "{category}. {price}. {cta}.",
+        "{cta}: {price}. {category}."
+      ]
+    },
+
+    "price_formats": [
+      "{number} руб/шт",
+      "от {min} до {max} ₽",
+      "{number} руб — штука"
+    ],
+
+    "expand_strategies": {
+      "strategies": [
+        "add_numbers",
+        "add_comparison",
+        "add_consequence"
+      ],
+      "rotation": "random",
+      "add_numbers_example": "на {volume} человек нужно {count} шт → {total} руб",
+      "add_comparison_example": "дешёвые {pain}, эти — {antipain}",
+      "add_consequence_example": "иначе: {pain_point}"
+    }
+  },
+
+  "fix_engine": {
+    "insert_price": { "strategy": "inject_default_price_or_context" },
+    "append_cta": { "strategy": "append_default_cta", "use_keywords_from_context": true },
+    "trim_advantage": { "strategy": "word_safe_trim" },
+    "replace_pain_point": { "strategy": "swap_from_variability_pool" },
+    "shorten_text": { "strategy": "remove_low_priority_phrases" },
+    "expand_text": {
+      "strategies": [
+        "add_numeric_argument",
+        "add_comparison_argument",
+        "add_consequence_argument"
+      ],
+      "rotation": "random"
+    },
+    "add_numeric_argument": { "strategy": "inject_volume_or_price" },
+    "add_comparison_argument": { "strategy": "inject_contrast_connector" },
+    "add_consequence_argument": { "strategy": "inject_pain_consequence" },
+    "inject_category_keyword": { "strategy": "insert_keyword_naturally" },
+    "reinforce_price_mention": { "strategy": "rephrase_to_highlight_price" },
+    "normalize_price": {
+      "strategy": "format_only",
+      "forbid_value_change": true,
+      "actions": ["add_space_before_rub", "replace_₽_with_rub_if_needed", "ensure_slash_format"],
+      "forbidden": ["change_number", "round", "convert_units"]
+    }
+  },
+
+  "adaptive_logic": {
+    "error_tracking": {
+      "track_last_errors": 5,
+      "group_by_type": true,
+      "context_fields": ["mode", "category", "template_version"]
+    },
+    "rules": {
+      "if_same_error_twice": "switch_template",
+      "if_three_failures": "force_full_regenerate",
+      "if_duplicate_detected": "rotate_pain_points"
+    }
+  },
+
+  "prohibitions": [
+    "полный regenerate без попытки FIX",
+    "игнорирование validator ошибок",
+    "повтор генерации без изменения стратегии",
+    "выход в OUTPUT с незакрытыми ошибками",
+    "fix без контекста (что именно чинить)",
+    "изменение числового значения при normalize_price",
+    "выход в OUTPUT при semantic_score < 0.6",
+    "исправление нескольких ошибок одновременно без блокировки price",
+    "бесконечный цикл IMPROVE_SEMANTICS"
+  ]
+}
